@@ -1,16 +1,12 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
-
-pub mod io {}
+pub mod parser {}
 
 pub mod lexer {
-    use std::{fs::read_to_string, path::PathBuf};
+    use std::{fs::read_to_string, path::Path};
 
     use logos::{Lexer, Logos};
 
     #[derive(Logos, Debug, PartialEq)]
-    #[logos(skip r"[ \t\r\n\f]+", extras = &PathBuf)]
+    #[logos(skip r"[ \t\r\n\f]+", extras = &'s Path)]
     pub enum Token {
         #[regex(r"[a-zA-Z\-_]+", |lex| lex.slice().to_owned())]
         Identifier(String),
@@ -36,6 +32,9 @@ pub mod lexer {
         #[token(";")]
         Semicolon,
 
+        #[token(",")]
+        Comma,
+
         #[token("/")]
         Division,
 
@@ -44,14 +43,14 @@ pub mod lexer {
     }
 
     fn parse_include(lexer: &mut Lexer<Token>) -> Option<Vec<Token>> {
-        let path = &(lexer.slice()[9..lexer.slice().len() - 2]);
-        println!("Parsing path {}", path);
-        return lex(lexer.extras, &read_to_string(&path).unwrap());
+        let included_file_path = &(lexer.slice()[9..lexer.slice().len() - 2]);
+        let resolved_path = lexer.extras.join(included_file_path);
+        println!("Parsing path {}", resolved_path.display());
+        lex(lexer.extras, &read_to_string(resolved_path).unwrap())
     }
 
-    pub fn lex(file_path: &PathBuf, text: &str) -> Option<Vec<Token>> {
-        let mut lex = Token::lexer(text);
-        lex.extras = file_path;
+    pub fn lex(file_path: &Path, text: &str) -> Option<Vec<Token>> {
+        let mut lex = Token::lexer_with_extras(text, file_path);
         let mut vec = vec![];
         while let Some(parsed_token) = lex.next() {
             if let Ok(token) = parsed_token {
@@ -62,16 +61,5 @@ pub mod lexer {
             }
         }
         Some(vec)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
     }
 }

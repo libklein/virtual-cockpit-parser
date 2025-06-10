@@ -7,7 +7,13 @@ fn main() {
     let mut args = args();
     let executable_name = args.next().unwrap();
     if let Some(cockpit_path) = args.next() {
-        let tokens = lex(&read_to_string(cockpit_path).unwrap());
+        let cockpit_dir = std::path::Path::new(&cockpit_path).parent().unwrap();
+        println!(
+            "Parsing cockpit file: {} in {}",
+            cockpit_path,
+            cockpit_dir.display()
+        );
+        let tokens = lex(cockpit_dir, &read_to_string(&cockpit_path).unwrap());
         for token in tokens.unwrap() {
             println!("{:?}", token);
         }
