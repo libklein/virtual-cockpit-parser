@@ -3,46 +3,50 @@ pub mod parser {}
 pub mod lexer {
     use std::{fs::read_to_string, path::Path};
 
-    use logos::{Lexer, Logos};
+    use logos::{Lexer, Logos, Skip};
 
     #[derive(Logos, Debug, PartialEq)]
     #[logos(skip r"[ \t\r\n\f]+", extras = &'s Path)]
     pub enum Token {
-        #[regex(r"[a-zA-Z\-_]+", |lex| lex.slice().to_owned())]
-        Identifier(String),
-
-        #[regex(r"[0-9]+(\.[0-9]+)?", |lex| lex.slice().parse::<f64>().unwrap())]
-        Number(f64),
-
-        #[token(r"{")]
-        OpenBrace,
-
-        #[token(r"}")]
-        CloseBrace,
-
-        #[token(r"=")]
-        EqualSign,
-
-        #[regex(r"#Include\(([^)]+)\)#", parse_include)]
+        #[regex(r"#Include\([\./a-zA-Z0-9_\-\s\&\+]+\)#", parse_include)]
         Include(Vec<Token>),
 
-        #[regex(r"\$([A-Fa-f0-9]{8})", |lex| lex.slice()[1..].to_owned())]
-        Color(String),
+        #[token("}")]
+        BlockEnd,
 
-        #[token(";")]
-        Semicolon,
+        #[regex(r"\w[\w\-\s]*=[^;\}\{]*;?", parse_assignment)]
+        Assignment(Vec<String>),
 
-        #[token(",")]
-        Comma,
+        #[regex(r"([^\s\{\}\/][\S&&[^\{]]*)?\{", parse_block_begin)]
+        BlockBegin(Option<String>),
 
-        #[token("/")]
-        Division,
+        #[regex(r"//.*\n", |_| Skip)]
+        Comment,
+    }
 
-        #[token("&")]
-        And,
+    fn parse_block_begin(lexer: &mut Lexer<Token>) -> Option<String> {
+        let slice = lexer.slice();
+        if slice.ends_with('{') {
+            Some(slice[..slice.len() - 1].trim().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn parse_assignment(lexer: &mut Lexer<Token>) -> Option<Vec<String>> {
+        Some(
+            lexer
+                .slice()
+                .strip_suffix(";")
+                .unwrap_or(lexer.slice())
+                .split('=')
+                .map(|s| s.trim().to_string())
+                .collect(),
+        )
     }
 
     fn parse_include(lexer: &mut Lexer<Token>) -> Option<Vec<Token>> {
+        println!("Parsing include directive: {}", lexer.slice());
         let included_file_path = &(lexer.slice()[9..lexer.slice().len() - 2]);
         let resolved_path = lexer.extras.join(included_file_path);
         println!("Parsing path {}", resolved_path.display());
@@ -54,6 +58,7 @@ pub mod lexer {
         let mut vec = vec![];
         while let Some(parsed_token) = lex.next() {
             if let Ok(token) = parsed_token {
+                println!("TOKEN: {:?}", token);
                 vec.push(token);
             } else {
                 println!("ERROR: {:?}", lex.slice());
@@ -61,5 +66,27 @@ pub mod lexer {
             }
         }
         Some(vec)
+    }
+
+    #[cfg(test)]
+    mod test {
+        use crate::lexer::lex;
+        use std::{fs::read_to_string, path::Path};
+
+        #[test]
+        fn lex_example_cockpits() {
+            // Discover tests in test/ directory
+            let root_path = Path::new("./test/");
+
+            for dir in std::fs::read_dir(root_path).unwrap().flatten() {
+                let cockpit_file = dir.path().join("Cockpit.ini");
+                if !cockpit_file.is_file() {
+                    continue;
+                }
+                println!("Cockpit file: {}", cockpit_file.to_string_lossy());
+
+                assert!(lex(&dir.path(), &read_to_string(cockpit_file).unwrap()).is_some());
+            }
+        }
     }
 }
