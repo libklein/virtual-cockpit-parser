@@ -2,11 +2,14 @@ pub mod parser {}
 
 pub mod lexer {
     use core::fmt;
+    use fallible_iterator::{convert, FallibleIterator};
     use std::{
         error::Error,
-        fs::read_to_string,
+        fs::File,
+        io::BufReader,
         path::{Path, PathBuf},
     };
+    use utf8_read::Reader;
 
     #[derive(Debug, PartialEq)]
     pub enum Token {
@@ -21,37 +24,62 @@ pub mod lexer {
     pub struct LexerError {
         path: PathBuf,
         partial_token: String,
+        message: String,
     }
 
     impl fmt::Display for LexerError {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "Error parsing file {}.", self.path.display())
+            write!(
+                f,
+                "Error parsing file {}. Stopped at: {}. Message: {}",
+                self.path.display(),
+                self.partial_token,
+                self.message
+            )
         }
     }
     impl Error for LexerError {}
 
     pub struct Lexer<'a> {
-        text: String,
         file_path: &'a Path,
-        buf_start: usize,
+        reader: Reader<BufReader<File>>,
+        nested_lexer: Option<Box<Self>>,
+    }
+
+    fn is_terminal(char: &char) -> bool {
+        matches!(char, '=' | '{' | '}' | ';' | '#')
     }
 
     impl<'a> Lexer<'a> {
-        pub fn new(text: String, file_path: &'a Path) -> Self {
-            Lexer {
-                text,
+        pub fn new(file_path: &'a Path) -> Result<Self, LexerError> {
+            let file = File::open(file_path).map_err(|err| LexerError {
+                path: file_path.to_owned(),
+                partial_token: String::new(),
+                message: format!("{}", err),
+            })?;
+            Ok(Lexer {
                 file_path,
-                buf_start: 0,
-            }
+                reader: Reader::new(BufReader::new(file)),
+                nested_lexer: None,
+            })
         }
 
-        pub fn from_file(file_path: &'a Path) -> Self {
-            let file_content = read_to_string(file_path).unwrap();
-            Lexer {
-                text: file_content,
-                file_path,
-                buf_start: 0,
+        fn nest(&mut self, file_path: &'a Path) -> Result<&mut Self, LexerError> {
+            if self.nested_lexer.is_some() {
+                return Err(LexerError {
+                    path: self.file_path.to_owned(),
+                    partial_token: String::new(),
+                    message: "Cannot construct another nested lexer".to_owned(),
+                });
             }
+            self.nested_lexer = Some(Box::new(Lexer::new(file_path)?));
+            Ok(self)
+        }
+
+        fn get_dir(&self) -> &Path {
+            self.file_path
+                .parent()
+                .expect("Failed to get file parent directory")
         }
     }
 
@@ -59,61 +87,54 @@ pub mod lexer {
         type Item = Result<Token, LexerError>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            let mut buf_len = 0;
-            let mut non_whitespace_len = 0;
+            if self.reader.eof() {
+                return None;
+            }
 
-            let remaining_text = &self.text[self.buf_start..];
-            for next_char in remaining_text.chars() {
-                let num_bytes = next_char.len_utf8();
-                // Ignore whitespace
-                if next_char.is_whitespace() {
-                    buf_len += num_bytes;
-                    continue;
-                }
+            let mut chars = convert(self.reader.into_iter())
+                .skip_while(|char| Ok(char.is_whitespace()))
+                .peekable();
 
-                // TODO: Handle comments
-
-                match next_char {
-                    '=' | '{' | '}' | '#' | ';' => {
-                        if non_whitespace_len > 0 {
-                            self.buf_start += buf_len;
-                            // Text
-                            return Some(Ok(Token::Text(
-                                remaining_text[..buf_len].trim().to_owned(),
-                            )));
+            // Detect next token
+            match chars.peek() {
+                Ok(next_char) => {
+                    if let Some(next_char) = next_char {
+                        if is_terminal(next_char) {
+                            Some(Ok(match chars.next() {
+                                Ok(Some('=')) => Token::Equals,
+                                Ok(Some(';')) => Token::Semicolon,
+                                Ok(Some('{')) => Token::BlockBegin,
+                                Ok(Some('}')) => Token::BlockEnd,
+                                // TODO: Create sublexer
+                                Ok(Some('#')) => todo!("Implement #Include()#"),
+                                _ => panic!("Could not decode previously decoded char"),
+                            }))
                         } else {
-                            // Handle special character
-                            self.buf_start += buf_len + num_bytes;
-                            return match next_char {
-                                '=' => Some(Ok(Token::Equals)),
-                                '{' => Some(Ok(Token::BlockBegin)),
-                                '}' => Some(Ok(Token::BlockEnd)),
-                                ';' => Some(Ok(Token::Semicolon)),
-                                '#' => todo!("Include found!"),
-                                _ => panic!("Unhandled special character {}", next_char),
-                            };
+                            Some(Ok(Token::Text(
+                                chars
+                                    .take_while(|x| Ok(!is_terminal(x)))
+                                    .unwrap()
+                                    .collect::<String>()
+                                    // TODO:Better way of discarding whitespace at end
+                                    .trim_end()
+                                    .to_owned(),
+                            )))
                         }
+                    } else {
+                        None
                     }
-                    _ => {}
                 }
-
-                buf_len += num_bytes;
-                non_whitespace_len += num_bytes;
-            }
-
-            // We've still had input left
-            if non_whitespace_len > 0 {
-                return Some(Err(LexerError {
+                Err(decode_error) => Some(Err(LexerError {
                     path: self.file_path.to_owned(),
-                    partial_token: remaining_text[0..buf_len].to_owned(),
-                }));
+                    partial_token: String::new(),
+                    message: decode_error.to_string(),
+                })),
             }
-            None
         }
     }
 
-    pub fn lex(file_path: &Path, text: &str) -> Result<Vec<Token>, LexerError> {
-        let lexer = Lexer::new(text.to_owned(), file_path);
+    pub fn lex(file_path: &Path) -> Result<Vec<Token>, LexerError> {
+        let lexer = Lexer::new(file_path)?;
         for next_token in lexer {
             if let Ok(next_token) = next_token {
                 println!("{:?}", next_token)
@@ -128,7 +149,7 @@ pub mod lexer {
     #[cfg(test)]
     mod test {
         use crate::lexer::lex;
-        use std::{fs::read_to_string, path::Path};
+        use std::path::Path;
 
         #[test]
         fn lex_example_cockpits() {
@@ -142,7 +163,7 @@ pub mod lexer {
                 }
                 println!("Cockpit file: {}", cockpit_file.to_string_lossy());
 
-                assert!(lex(&dir.path(), &read_to_string(cockpit_file).unwrap()).is_ok());
+                assert!(lex(root_path).is_ok());
             }
         }
     }

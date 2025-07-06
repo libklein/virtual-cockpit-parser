@@ -13,7 +13,7 @@ fn main() {
             cockpit_path,
             cockpit_dir.display()
         );
-        let tokens = lex(cockpit_dir, &read_to_string(&cockpit_path).unwrap());
+        let tokens = lex(std::path::Path::new(&cockpit_path));
         for token in tokens.unwrap() {
             println!("{:?}", token);
         }
