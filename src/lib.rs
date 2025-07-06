@@ -2,11 +2,12 @@ pub mod parser {}
 
 pub mod lexer {
     use core::fmt;
-    use fallible_iterator::{convert, FallibleIterator};
+    use fallible_iterator::{convert, FallibleIterator, IntoFallibleIterator};
     use std::{
         error::Error,
         fs::File,
         io::BufReader,
+        ops::Deref,
         path::{Path, PathBuf},
     };
     use utf8_read::Reader;
@@ -40,8 +41,8 @@ pub mod lexer {
     }
     impl Error for LexerError {}
 
-    pub struct Lexer<'a> {
-        file_path: &'a Path,
+    pub struct Lexer {
+        file_path: PathBuf,
         reader: Reader<BufReader<File>>,
         nested_lexer: Option<Box<Self>>,
     }
@@ -50,9 +51,9 @@ pub mod lexer {
         matches!(char, '=' | '{' | '}' | ';' | '#')
     }
 
-    impl<'a> Lexer<'a> {
-        pub fn new(file_path: &'a Path) -> Result<Self, LexerError> {
-            let file = File::open(file_path).map_err(|err| LexerError {
+    impl Lexer {
+        pub fn new(file_path: PathBuf) -> Result<Self, LexerError> {
+            let file = File::open(&file_path).map_err(|err| LexerError {
                 path: file_path.to_owned(),
                 partial_token: String::new(),
                 message: format!("{}", err),
@@ -64,7 +65,7 @@ pub mod lexer {
             })
         }
 
-        fn nest(&mut self, file_path: &'a Path) -> Result<&mut Self, LexerError> {
+        fn nest(&mut self, file_path: PathBuf) -> Result<(), LexerError> {
             if self.nested_lexer.is_some() {
                 return Err(LexerError {
                     path: self.file_path.to_owned(),
@@ -72,8 +73,9 @@ pub mod lexer {
                     message: "Cannot construct another nested lexer".to_owned(),
                 });
             }
+            println!("Creating nested lexer for {}", &file_path.display());
             self.nested_lexer = Some(Box::new(Lexer::new(file_path)?));
-            Ok(self)
+            Ok(())
         }
 
         fn get_dir(&self) -> &Path {
@@ -83,10 +85,17 @@ pub mod lexer {
         }
     }
 
-    impl<'a> Iterator for Lexer<'a> {
+    impl Iterator for Lexer {
         type Item = Result<Token, LexerError>;
 
         fn next(&mut self) -> Option<Self::Item> {
+            if let Some(nested_lexer) = &mut self.nested_lexer {
+                println!("Calling nested lexer");
+                match nested_lexer.next() {
+                    None => self.nested_lexer = None,
+                    Some(result) => return Some(result),
+                };
+            }
             if self.reader.eof() {
                 return None;
             }
@@ -100,15 +109,47 @@ pub mod lexer {
                 Ok(next_char) => {
                     if let Some(next_char) = next_char {
                         if is_terminal(next_char) {
-                            Some(Ok(match chars.next() {
-                                Ok(Some('=')) => Token::Equals,
-                                Ok(Some(';')) => Token::Semicolon,
-                                Ok(Some('{')) => Token::BlockBegin,
-                                Ok(Some('}')) => Token::BlockEnd,
+                            match chars.next() {
+                                Ok(Some('=')) => Some(Ok(Token::Equals)),
+                                Ok(Some(';')) => Some(Ok(Token::Semicolon)),
+                                Ok(Some('{')) => Some(Ok(Token::BlockBegin)),
+                                Ok(Some('}')) => Some(Ok(Token::BlockEnd)),
                                 // TODO: Create sublexer
-                                Ok(Some('#')) => todo!("Implement #Include()#"),
+                                Ok(Some('#')) => {
+                                    let expected_string = "Include(";
+                                    let include_sequence = chars
+                                        .by_ref()
+                                        .take(expected_string.len())
+                                        .collect::<String>()
+                                        .unwrap();
+                                    if include_sequence != expected_string {
+                                        return Some(Err(LexerError {
+                                            path: self.file_path.to_owned(),
+                                            partial_token: include_sequence.clone(),
+                                            message: format!(
+                                                "Expected \"Include(\" after # but found '{}'",
+                                                include_sequence
+                                            ),
+                                        }));
+                                    }
+                                    let included_file_path = chars
+                                        .by_ref()
+                                        .take_while(|x| Ok(*x != ')'))
+                                        .collect::<String>()
+                                        .unwrap();
+
+                                    // Discard #
+                                    let _ = chars.next();
+                                    let _ = chars.next();
+
+                                    self.nest(
+                                        self.file_path.parent().unwrap().join(included_file_path),
+                                    )
+                                    .ok()?;
+                                    self.next()
+                                }
                                 _ => panic!("Could not decode previously decoded char"),
-                            }))
+                            }
                         } else {
                             Some(Ok(Token::Text(
                                 chars
@@ -133,13 +174,13 @@ pub mod lexer {
         }
     }
 
-    pub fn lex(file_path: &Path) -> Result<Vec<Token>, LexerError> {
+    pub fn lex(file_path: PathBuf) -> Result<Vec<Token>, LexerError> {
         let lexer = Lexer::new(file_path)?;
         for next_token in lexer {
             if let Ok(next_token) = next_token {
                 println!("{:?}", next_token)
             } else {
-                println!("Error");
+                println!("Error: {}", next_token.unwrap_err());
                 break;
             }
         }
@@ -163,7 +204,7 @@ pub mod lexer {
                 }
                 println!("Cockpit file: {}", cockpit_file.to_string_lossy());
 
-                assert!(lex(root_path).is_ok());
+                assert!(lex(root_path.to_path_buf()).is_ok());
             }
         }
     }
